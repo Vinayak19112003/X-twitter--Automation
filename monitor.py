@@ -20,6 +20,7 @@ Write short, sharp replies.
 No emojis.
 No hype.
 No marketing tone.
+No em-dashes (—). Use hyphens or simple punctuation.
 Do not explain basic concepts.
 Never start with "I" or "This".
 Be slightly contrarian or add a unique angle."""
@@ -29,8 +30,15 @@ USER_PROMPT_TEMPLATE = """Tweet:
 
 Write a 1–2 sentence reply that adds a thoughtful or insider-style perspective."""
 
+# Strict filtering keywords
+RELEVANT_KEYWORDS = [
+    "web3", "crypto", "trading", "ai", "bitcoin", "solana", "eth", 
+    "ethereum", "blockchain", "defi", "nft", "token", "market",
+    "pump", "dump", "alpha", "gem", "bull", "bear", "analysis"
+]
 
-def generate_reply_sync(tweet_text: str, images: list[str] = None) -> tuple[str | None, str | None]:
+
+def generate_reply_sync(tweet_text: str) -> tuple[str | None, str | None]:
     """Generate a reply using OpenRouter (synchronous)"""
     if not settings.openrouter_api_key:
         return None, "OpenRouter API key not configured in .env"
@@ -42,20 +50,13 @@ def generate_reply_sync(tweet_text: str, images: list[str] = None) -> tuple[str 
         "X-Title": "GhostReply"
     }
 
-    # Construct content (Text + Optional Images)
-    user_content = [{"type": "text", "text": USER_PROMPT_TEMPLATE.format(tweet_text=tweet_text)}]
-    
-    if images:
-        for img_url in images:
-             user_content.append({"type": "image_url", "image_url": {"url": img_url}})
-    
     payload = {
         "model": settings.ai_model,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_content}
+            {"role": "user", "content": USER_PROMPT_TEMPLATE.format(tweet_text=tweet_text)}
         ],
-        "max_tokens": 100,
+        "max_tokens": 1000,
         "temperature": 0.8
     }
     
@@ -65,7 +66,14 @@ def generate_reply_sync(tweet_text: str, images: list[str] = None) -> tuple[str 
             response.raise_for_status()
             
             data = response.json()
-            reply_text = data["choices"][0]["message"]["content"].strip()
+            # DEBUG RESPONSE
+            print(f"  🔍 Raw API Response: {data}")
+            
+            reply_text = data["choices"][0]["message"]["content"]
+            if reply_text:
+                reply_text = reply_text.strip()
+            else:
+                reply_text = ""
             
             # Remove surrounding quotes if present
             if reply_text.startswith('"') and reply_text.endswith('"'):
@@ -204,11 +212,8 @@ class GhostReplyMonitor:
         
         # Generate reply
         print(f"🤖 Generating reply for: {tweet['text'][:60]}...")
-        images = tweet.get("images", [])
-        if images:
-            print(f"  🖼️ Found {len(images)} images")
-            
-        reply_text, error = generate_reply_sync(tweet["text"], images)
+        
+        reply_text, error = generate_reply_sync(tweet["text"])
             
         if error:
             print(f"⚠️ Generation failed: {error}")

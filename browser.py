@@ -39,6 +39,10 @@ class TwitterBrowser:
         else:
             self.page = self.context.new_page()
         
+        # Increase default timeout to 60s (for slow connections)
+        self.page.set_default_timeout(60000)
+        self.page.set_default_navigation_timeout(60000)
+        
         return self
     
     def close(self):
@@ -318,13 +322,13 @@ class TwitterBrowser:
         return has_keyword and not has_ignore
     
     def post_reply(self, tweet_url: str, reply_text: str) -> bool:
-        """Post a reply (Aggressive Mode)"""
+        """Post a reply (Aggressive Mode - Keyboard Shortcut)"""
         try:
             print(f"  Navigating to: {tweet_url}")
             # Use domcontentloaded but wait longer explicitly
             self.page.goto(tweet_url, wait_until="domcontentloaded", timeout=60000)
             print("  Waiting for page load...")
-            time.sleep(12)
+            time.sleep(10)
             
             # Method 1: Check for input area directly
             reply_input = self.page.query_selector('[data-testid="tweetTextarea_0"]')
@@ -335,49 +339,45 @@ class TwitterBrowser:
                 reply_btn = self.page.query_selector('[data-testid="reply"]')
                 if reply_btn:
                     print("  Clicking reply button (Force)...")
-                    reply_btn.scroll_into_view_if_needed()
-                    time.sleep(1)
-                    reply_btn.click(force=True)
-                    time.sleep(3)
+                    try:
+                        reply_btn.click(force=True, timeout=5000)
+                        time.sleep(3)
+                    except:
+                        pass
                     reply_input = self.page.query_selector('[data-testid="tweetTextarea_0"]')
             
             if not reply_input:
                 print("❌ Reply input not found")
                 return False
             
-            print("  Typing reply...")
-            reply_input.scroll_into_view_if_needed()
-            reply_input.click(force=True)
-            time.sleep(1)
-            reply_input.focus()
-            
-            # Force input event by typing character by character (Simulate Human)
-            reply_input.click(force=True)
-            self.page.keyboard.type(reply_text, delay=50)
-            time.sleep(1)
-            
-            # Click Post
-            print("  Clicking Post button...")
-            post_btn = self.page.query_selector('[data-testid="tweetButtonInline"]')
-            if not post_btn:
-                 post_btn = self.page.query_selector('[data-testid="tweetButton"]')
-                
-            if not post_btn:
-                print("❌ Post button not found")
+            print(f"  Typing reply ({len(reply_text)} chars)...")
+            try:
+                reply_input.click(force=True, timeout=5000)
+                time.sleep(1)
+                reply_input.fill("") # Clear first
+                self.page.keyboard.type(reply_text, delay=15)
+                time.sleep(1)
+            except Exception as e:
+                print(f"  ⚠️ Typing error: {e}")
                 return False
             
-            # Wait for button to enable (max 5s)
-            for _ in range(5):
-                if post_btn.get_attribute("aria-disabled") != "true":
-                    break
-                time.sleep(1)
-                print("  Waiting for button to enable...")
-            
-            if post_btn.get_attribute("aria-disabled") == "true":
-                 print("⚠️ Button disabled, forcing click anyway...")
-
-            post_btn.click(force=True)
+            # Click Post or use Shortcut
+            print("  Posting (Ctrl+Enter)...")
+            self.page.keyboard.press("Control+Enter")
             time.sleep(5)
+            
+            # Verify success (check if input cleared or disappeared)
+            remaining_input = self.page.query_selector('[data-testid="tweetTextarea_0"]')
+            if remaining_input:
+                val = remaining_input.input_value()
+                if val and len(val) > 0:
+                     print("  ⚠️ Ctrl+Enter failed, trying button...")
+                     post_btn = self.page.query_selector('[data-testid="tweetButtonInline"]')
+                     if not post_btn: post_btn = self.page.query_selector('[data-testid="tweetButton"]')
+                     
+                     if post_btn: 
+                        post_btn.click(force=True, timeout=5000)
+                        time.sleep(5)
             
             print(f"✅ Reply posted: {reply_text[:50]}...")
             return True
