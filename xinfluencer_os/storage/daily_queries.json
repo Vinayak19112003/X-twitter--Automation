@@ -1,0 +1,89 @@
+{
+  "date": "2026-01-17",
+  "queries": [
+    {
+      "q": "\"vibe coding\" min_faves:10",
+      "topic": "vibecoding"
+    },
+    {
+      "q": "vibecoding min_faves:10",
+      "topic": "vibecoding"
+    },
+    {
+      "q": "\"vibe-coding\" min_faves:10",
+      "topic": "vibecoding"
+    },
+    {
+      "q": "\"cursor ide\" min_faves:10",
+      "topic": "cursor_ide"
+    },
+    {
+      "q": "cursor editor min_faves:10",
+      "topic": "cursor_ide"
+    },
+    {
+      "q": "\"cursor ai\" coding min_faves:10",
+      "topic": "cursor_ide"
+    },
+    {
+      "q": "\"claude code\" min_faves:10",
+      "topic": "claude_code"
+    },
+    {
+      "q": "\"claude artifacts\" min_faves:10",
+      "topic": "claude_code"
+    },
+    {
+      "q": "\"ai coding assistant\" min_faves:10",
+      "topic": "ai_coding_assistants"
+    },
+    {
+      "q": "ai coding assistants min_faves:10",
+      "topic": "ai_coding_assistants"
+    },
+    {
+      "q": "\"openai\" codex OR gpt developers min_faves:10",
+      "topic": "openai_updates"
+    },
+    {
+      "q": "\"chatgpt\" developers min_faves:10",
+      "topic": "openai_updates"
+    },
+    {
+      "q": "gemini coding OR \"gemini ai\" developers min_faves:10",
+      "topic": "gemini"
+    },
+    {
+      "q": "\"google ai\" coding min_faves:10",
+      "topic": "gemini"
+    },
+    {
+      "q": "langchain OR crewai OR autogpt min_faves:10",
+      "topic": "ai_agent_frameworks"
+    },
+    {
+      "q": "\"ai agent\" framework min_faves:10",
+      "topic": "ai_agent_frameworks"
+    },
+    {
+      "q": "\"build in public\" ai min_faves:10",
+      "topic": "build_in_public"
+    },
+    {
+      "q": "building ai product min_faves:10",
+      "topic": "build_in_public"
+    },
+    {
+      "q": "\"ai developer workflow\" min_faves:10",
+      "topic": "ai_dev_workflows"
+    },
+    {
+      "q": "\"windsurf\" OR codeium min_faves:10",
+      "topic": "windsurf_codeium"
+    },
+    {
+      "q": "copilot OR tabnine min_faves:10",
+      "topic": "copilot_tabnine"
+    }
+  ]
+}

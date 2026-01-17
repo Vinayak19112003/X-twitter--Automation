@@ -394,6 +394,151 @@ class BrowserOperator:
         except Exception as e:
             print(f"❌ Feed error: {e}")
             return []
+    
+    def discover_from_search(self, query: str, topic: str = "general", 
+                             min_likes: int = 50, min_followers: int = 5000,
+                             max_tweets: int = 10) -> list[dict]:
+        """
+        Discover tweets from X search with filtering
+        
+        Args:
+            query: Search query string (supports X operators)
+            topic: Topic category for logging
+            min_likes: Minimum likes threshold
+            min_followers: Minimum author followers
+            max_tweets: Max tweets to return
+        """
+        # Skip patterns for filtering
+        SKIP_PATTERNS = [
+            "giveaway", "airdrop", "free crypto", "web3", "nft drop",
+            "send me", "follow me", "retweet to win", "dm me",
+            "meme", "politics", "election", "trump", "biden"
+        ]
+        
+        try:
+            print(f"🔍 Searching: {query[:50]}... [{topic}]")
+            
+            # Encode query for URL
+            encoded_query = query.replace(" ", "%20").replace('"', '%22')
+            search_url = f"https://x.com/search?q={encoded_query}&src=typed_query&f=top"
+            
+            self.page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
+            time.sleep(5)
+            
+            # Scroll to load more
+            for _ in range(3):
+                self.page.mouse.wheel(0, 600)
+                time.sleep(2)
+            
+            tweets = []
+            articles = self.page.query_selector_all('article[data-testid="tweet"]')
+            
+            for article in articles:
+                if len(tweets) >= max_tweets:
+                    break
+                    
+                try:
+                    # Extract text
+                    text_el = article.query_selector('[data-testid="tweetText"]')
+                    text = text_el.inner_text() if text_el else ""
+                    
+                    if not text:
+                        continue
+                    
+                    # Skip unwanted content
+                    text_lower = text.lower()
+                    if any(p in text_lower for p in SKIP_PATTERNS):
+                        continue
+                    
+                    # Extract author info
+                    author_el = article.query_selector('[data-testid="User-Name"]')
+                    author = author_el.inner_text().split("\n")[0] if author_el else ""
+                    
+                    # Extract handle
+                    handle = ""
+                    if author_el:
+                        spans = author_el.query_selector_all("span")
+                        for span in spans:
+                            t = span.inner_text()
+                            if t.startswith("@"):
+                                handle = t[1:]
+                                break
+                    
+                    # Extract link
+                    link_el = article.query_selector('a[href*="/status/"]')
+                    url = f"https://x.com{link_el.get_attribute('href')}" if link_el else ""
+                    
+                    # Extract engagement metrics
+                    like_count = 0
+                    retweet_count = 0
+                    
+                    # Try to get like count
+                    like_el = article.query_selector('[data-testid="like"] span')
+                    if like_el:
+                        like_text = like_el.inner_text()
+                        like_count = self._parse_count(like_text)
+                    
+                    # Try to get retweet count
+                    rt_el = article.query_selector('[data-testid="retweet"] span')
+                    if rt_el:
+                        rt_text = rt_el.inner_text()
+                        retweet_count = self._parse_count(rt_text)
+                    
+                    # Filter by engagement
+                    if like_count < min_likes and retweet_count < 10:
+                        continue
+                    
+                    if text and url:
+                        tweets.append({
+                            "text": text,
+                            "url": url,
+                            "author": author,
+                            "handle": handle,
+                            "likes": like_count,
+                            "retweets": retweet_count,
+                            "source": "search",
+                            "query": query,
+                            "topic": topic
+                        })
+                        
+                except Exception:
+                    continue
+            
+            if not tweets:
+                try:
+                    title = self.page.title()
+                    content = self.page.content()[:500]
+                    print(f"⚠️ Debug: Search found 0 tweets. Page title: {title}")
+                    print(f"⚠️ Debug Page Start: {content}")
+                    
+                    # Check for "top" tab specifically
+                    top_tab = self.page.query_selector('a[href*="&f=top"]')
+                    if top_tab:
+                        print("⚠️ 'Top' tab selector found (maybe not active?)")
+                except:
+                    pass
+            
+            print(f"📋 Found {len(tweets)} tweets from search")
+            return tweets
+            
+        except Exception as e:
+            print(f"❌ Search error: {e}")
+            return []
+    
+    def _parse_count(self, text: str) -> int:
+        """Parse count text like '1.2K' or '500' to int"""
+        if not text:
+            return 0
+        text = text.strip().upper()
+        try:
+            if "K" in text:
+                return int(float(text.replace("K", "")) * 1000)
+            elif "M" in text:
+                return int(float(text.replace("M", "")) * 1000000)
+            else:
+                return int(text)
+        except:
+            return 0
 
 
 def interactive_login():

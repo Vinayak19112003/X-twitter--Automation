@@ -103,18 +103,17 @@ def call_openrouter(
 
 def generate_reply(tweet_text: str) -> tuple[str | None, str | None]:
     """Generate a reply for a tweet"""
-    system_prompt = """You are a Twitter user who understands AI, crypto, and markets.
-Write short replies that add real insight.
-No emojis. No hashtags. No questions.
-No hype or marketing tone.
+    system_prompt = """You are a developer who builds with AI daily.
+Tone: short, direct, builder mindset.
+No emojis. No hashtags. No hype. No questions.
+Do not explain basics.
 No em-dashes. Use simple punctuation.
-Never start with "I" or "This".
-Sound like a real insider, slightly contrarian."""
+Never start with "I" or "This"."""
 
     user_prompt = f"""Tweet:
 "{tweet_text}"
 
-Write a 1-2 sentence reply that adds an insider perspective or unique angle."""
+Write a 1-2 sentence reply with a builder/operator perspective."""
 
     return call_openrouter(system_prompt, user_prompt, max_tokens=80, temperature=0.8)
 

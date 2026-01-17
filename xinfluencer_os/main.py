@@ -14,7 +14,8 @@ from config import settings
 from db import init_db, SessionLocal, get_today_stats
 from agents.trend_research import run_trend_research, get_unused_trends
 from agents.content_writer import create_daily_content, get_pending_drafts
-from agents.reply_generator import generate_reply
+from agents.openrouter_client import generate_reply
+from agents.perplexity_queries import get_daily_queries
 from agents.quality_safety import (
     validate_content, should_skip_random, can_reply_to_account,
     check_daily_limits, record_reply, record_account_reply, load_recent_replies
@@ -223,6 +224,118 @@ class Orchestrator:
         
         print(f"\n✅ Cycle complete: {replies_posted} replies posted")
     
+    def run_search_reply_cycle(self):
+        """Discover tweets via Perplexity-generated search queries and reply"""
+        print("\n" + "-"*40)
+        print("🔍 SEARCH REPLY CYCLE (AI/VibeCoding)")
+        print("-"*40)
+        
+        # Check limits
+        can_reply, reason = check_daily_limits("reply")
+        if not can_reply:
+            print(f"⏸️ Daily limit: {reason}")
+            return
+        
+        if self.replies_this_hour >= self.hourly_target:
+            print(f"⏸️ Hourly limit: {self.replies_this_hour}/{self.hourly_target}")
+            return
+        
+        # Get daily search queries from Perplexity
+        queries = get_daily_queries()
+        if not queries:
+            print("📭 No search queries available")
+            return
+        
+        # Pick random queries for this cycle
+        selected_queries = random.sample(queries, min(3, len(queries)))
+        
+        replies_posted = 0
+        max_replies_per_cycle = 3
+        
+        for query_data in selected_queries:
+            if replies_posted >= max_replies_per_cycle:
+                break
+            
+            if not self.running:
+                break
+            
+            query = query_data.get("q", "")
+            topic = query_data.get("topic", "general")
+            
+            if not query:
+                continue
+            
+            # Discover tweets from search
+            tweets = self.browser.discover_from_search(
+                query=query,
+                topic=topic,
+                min_likes=50,
+                max_tweets=5
+            )
+            
+            if not tweets:
+                continue
+            
+            # Small delay between queries
+            time.sleep(random.uniform(2, 5))
+            
+            for tweet in tweets:
+                if replies_posted >= max_replies_per_cycle:
+                    break
+                
+                if not self.running:
+                    break
+                
+                # Account cooldown check
+                can_reply_acc, reason = can_reply_to_account(tweet.get("handle", ""))
+                if not can_reply_acc:
+                    print(f"⏸️ Account cooldown: {tweet.get('handle', '')}")
+                    continue
+                
+                # Random skip
+                skip, prob = should_skip_random()
+                if skip:
+                    print(f"🎲 Skipped (random {prob:.0%}) [{topic}]")
+                    continue
+                
+                # Generate reply
+                print(f"🤖 Generating for [{topic}]: {tweet['text'][:50]}...")
+                reply_text, error = generate_reply(tweet['text'])
+                
+                if error:
+                    print(f"⚠️ Gen error: {error}")
+                    continue
+                
+                # Validate
+                is_valid, reason = validate_content(reply_text, "reply")
+                if not is_valid:
+                    print(f"⚠️ Rejected: {reason}")
+                    # Try once more
+                    reply_text, error = generate_reply(tweet['text'])
+                    if error:
+                        continue
+                    is_valid, reason = validate_content(reply_text, "reply")
+                    if not is_valid:
+                        print(f"⚠️ Rejected again: {reason}")
+                        continue
+                
+                # Post reply
+                if self.browser.reply_to_tweet(tweet['url'], reply_text):
+                    replies_posted += 1
+                    self.replies_this_hour += 1
+                    
+                    # Record for safety tracking
+                    record_reply(reply_text)
+                    record_account_reply(tweet.get("handle", ""))
+                    
+                    # Log with source info
+                    print(f"📊 Posted [{topic}] | Session: {self.browser.session_actions}/{self.browser.session_target} | Hour: {self.replies_this_hour}/{self.hourly_target}")
+                    
+                    # Delay before next
+                    time.sleep(random.uniform(3, 8))
+        
+        print(f"\n✅ Search cycle complete: {replies_posted} replies posted")
+    
     def run_engagement_cycle(self):
         """Light engagement: likes and retweets"""
         # Check limits
@@ -277,8 +390,13 @@ class Orchestrator:
                 if cycle_count % 5 == 0:  # Every 5 cycles
                     self.run_content_creation_cycle()
                 
-                # 3. Reply Cycle (main activity)
-                self.run_reply_cycle()
+                # 3. Reply Cycle (main activity) - alternate between feed and search
+                if cycle_count % 2 == 1:
+                    # Odd cycles: Search-based discovery (AI/VibeCoding)
+                    self.run_search_reply_cycle()
+                else:
+                    # Even cycles: Feed-based discovery
+                    self.run_reply_cycle()
                 
                 # 4. Light Engagement
                 if random.random() < 0.3:
