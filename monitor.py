@@ -7,6 +7,7 @@ import time
 import random
 import httpx
 from datetime import datetime, timedelta
+from collections import deque
 from database import SessionLocal, Tweet, Reply, RepliedAccount, init_db
 from browser import TwitterBrowser
 from config import settings
@@ -100,8 +101,17 @@ class GhostReplyMonitor:
     def __init__(self):
         self.browser: TwitterBrowser | None = None
         self.running = False
+        
+        # Rate Limiting & Sessions
         self.replies_this_hour = 0
         self.hour_start = datetime.now()
+        self.hourly_target = random.randint(8, 14) # Random hourly cap
+        
+        # Human Session Logic
+        self.session_replies = 0
+        self.session_target = random.randint(settings.session_min_replies, settings.session_max_replies)
+        self.reply_history = deque(maxlen=30)
+        
         self.auto_post = False
     
     def start(self, headless: bool = False):
@@ -179,6 +189,58 @@ class GhostReplyMonitor:
         text_lower = text.lower()
         return any(keyword in text_lower for keyword in RELEVANT_KEYWORDS)
 
+    def _check_sleep_window(self) -> bool:
+        """Check if current time is within sleep window"""
+        now = datetime.now()
+        current_hour = now.hour
+        
+        # Simple window check (2 AM to 7 AM)
+        if settings.sleep_window_start <= current_hour < settings.sleep_window_end:
+             return True
+        return False
+
+    def _reset_hourly_limits(self):
+        """Reset hourly counters if hour changed"""
+        now = datetime.now()
+        if now.hour != self.hour_start.hour:
+            self.hour_start = now
+            self.replies_this_hour = 0
+            # Randomize target 8-14
+            self.hourly_target = random.randint(8, 14)
+            print(f"🔄 Hourly reset! Target: {self.hourly_target} replies")
+
+    def _validate_reply(self, text: str) -> tuple[bool, str]:
+        """Strict validation of reply content"""
+        if not text: return False, "Empty"
+        if len(text) > 240: return False, "Too long"
+        if "#" in text: return False, "Hashtag"
+        if "?" in text[-5:]: return False, "Question"
+        
+        # Forbidden phrases
+        forbidden = [
+            "as an ai", "certainly", "in conclusion", "i can help", 
+            "interesting tweet", "great point", "this is huge",
+            "delve", "crucial"
+        ]
+        if any(p in text.lower() for p in forbidden):
+            return False, "AI/Generic phrase"
+            
+        # Emoji check (Basic range)
+        # Banning typical high-byte chars often catches emojis in English text
+        # But let's be specific to avoid banning legit text too easily if not sure
+        common_emojis = ["🚀", "📈", "💎", "🔥", "🧵", "👇", "🤖", "🧠", "😅", "🙏", "👀"]
+        if any(e in text for e in common_emojis):
+            return False, "Emoji detected"
+            
+        # Similarity check
+        for past_reply in self.reply_history:
+             if text.lower() == past_reply.lower():
+                 return False, "Duplicate"
+             if text.lower().startswith(past_reply.lower()[:20]):
+                  return False, "Similar start"
+        
+        return True, "OK"
+
     def process_tweet(self, tweet: dict, db) -> Reply | None:
         """Process a single tweet - generate reply draft"""
         # strict relevancy check
@@ -193,7 +255,13 @@ class GhostReplyMonitor:
         
         # Check 24h account cooldown
         if self._should_skip_account(db, tweet.get("handle")):
-            print(f"⏭️ Skipping @{tweet.get('handle')} (24h cooldown)")
+            # print(f"⏭️ Skipping @{tweet.get('handle')} (24h cooldown)")
+            return None
+            
+        # Random Skip Chance (Human behavior)
+        # Skip 20-35% of eligible tweets
+        if random.random() < random.uniform(0.20, 0.35):
+            print(f"🎲 Skipped by random chance (Human behavior)")
             return None
         
         # Save tweet to DB
@@ -210,13 +278,28 @@ class GhostReplyMonitor:
         db.add(db_tweet)
         db.commit()
         
-        # Generate reply
+        # Generate reply (Retry Loop)
         print(f"🤖 Generating reply for: {tweet['text'][:60]}...")
         
-        reply_text, error = generate_reply_sync(tweet["text"])
+        reply_text = None
+        for attempt in range(2): # Try twice
+            raw_text, error = generate_reply_sync(tweet["text"])
             
-        if error:
-            print(f"⚠️ Generation failed: {error}")
+            if error:
+                print(f"⚠️ Generation failed: {error}")
+                break
+            
+            # Strict Validation
+            is_valid, reason = self._validate_reply(raw_text)
+            if is_valid:
+                reply_text = raw_text
+                break
+            else:
+                print(f"⚠️ Validation rejected ({reason}): {raw_text[:50]}... Retrying...")
+                time.sleep(1)
+        
+        if not reply_text:
+            print("❌ Failed to generate valid reply")
             return None
         
         # Save reply draft
@@ -278,13 +361,41 @@ class GhostReplyMonitor:
             for tweet in tweets:
                 if not self.running:
                     break
+                
+                # Check Hourly Limit inside loop
+                if self.replies_this_hour >= self.hourly_target:
+                    print("⏳ Hourly limit reached. Stopping cycle.")
+                    break
+
+                # Small delay between processing steps (1.5-5s) - User Req #2
+                delay = random.uniform(1.5, 5.0)
+                time.sleep(delay)
                     
                 reply = self.process_tweet(tweet, db)
                 
-                if reply and self.auto_post and self._can_reply():
-                    self.post_approved_reply(reply, db)
-                
-                time.sleep(2)
+                if reply and self.auto_post:
+                    # Check rate limit again
+                    if not self._can_reply():
+                        print("⏸️ Limit reached")
+                        break
+
+                    # post_approved_reply handles the "larger delay" before posting
+                    if self.post_approved_reply(reply, db):
+                         self.session_replies += 1
+                         self.reply_history.append(reply.reply_text)
+                         
+                         print(f"📊 Session: {self.session_replies}/{self.session_target} | Hour: {self.replies_this_hour}/{self.hourly_target}")
+                         
+                         # Human Break Check - User Req #1
+                         if self.session_replies >= self.session_target:
+                             break_time = random.randint(settings.break_min_minutes, settings.break_max_minutes)
+                             print(f"☕ Taking a human break! ({self.session_replies} replies). Sleeping {break_time} mins...")
+                             time.sleep(break_time * 60)
+                             
+                             # Reset Session
+                             self.session_replies = 0
+                             self.session_target = random.randint(settings.session_min_replies, settings.session_max_replies)
+                             print(f"👣 Back from break. New session target: {self.session_target}")
                 
         except Exception as e:
             print(f"❌ Cycle error: {e}")
@@ -294,13 +405,31 @@ class GhostReplyMonitor:
     def run_loop(self, interval_minutes: int = 5):
         """Run continuous monitoring loop"""
         print(f"🚀 Starting monitor (every {interval_minutes} min)...")
+        print(f"🎯 Hourly Target: {self.hourly_target} | Session Target: {self.session_target}")
         
         while self.running:
+            # 0. Sleep Window - User Req #7
+            if self._check_sleep_window():
+                 print(f"😴 Sleep Window ({settings.sleep_window_start}am-{settings.sleep_window_end}am). Sleeping 30m...")
+                 time.sleep(30 * 60)
+                 continue
+
+            # 1. Hourly Reset - User Req #6
+            self._reset_hourly_limits()
+            
+            # 2. Hourly Limit Check
+            if self.replies_this_hour >= self.hourly_target:
+                print(f"⏳ Hourly limit reached ({self.replies_this_hour}/{self.hourly_target}). Sleeping 5 mins...")
+                time.sleep(5 * 60)
+                continue
+
             self.run_cycle()
             
             if self.running:
-                print(f"💤 Sleeping {interval_minutes} minutes...")
-                time.sleep(interval_minutes * 60)
+                # Randomize loop sleep slightly
+                sleep_time = (interval_minutes * 60) + random.randint(10, 60)
+                print(f"💤 Sleeping ~{interval_minutes} minutes...")
+                time.sleep(sleep_time)
 
 
 def run_monitor(headless: bool = False, auto_post: bool = False):

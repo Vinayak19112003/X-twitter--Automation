@@ -23,6 +23,16 @@ class Settings(BaseSettings):
     min_followers: int = Field(default=5000, env="MIN_FOLLOWERS")
     min_likes: int = Field(default=50, env="MIN_LIKES")
     min_retweets: int = Field(default=10, env="MIN_RETWEETS")
+
+    # Humanization Settings
+    sleep_window_start: int = Field(default=2, env="SLEEP_WINDOW_START") # 2 AM
+    sleep_window_end: int = Field(default=7, env="SLEEP_WINDOW_END")     # 7 AM
+    
+    session_min_replies: int = Field(default=3, env="SESSION_MIN_REPLIES")
+    session_max_replies: int = Field(default=7, env="SESSION_MAX_REPLIES")
+    
+    break_min_minutes: int = Field(default=5, env="BREAK_MIN_MINUTES")
+    break_max_minutes: int = Field(default=25, env="BREAK_MAX_MINUTES")
     
     # Keywords to monitor
     keywords: list[str] = [
