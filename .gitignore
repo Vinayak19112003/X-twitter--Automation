@@ -19,6 +19,7 @@ profile/
 # Logs
 logs/
 *.log
+xinfluencer_os/storage/jev_shadow_logs/*.jsonl
 
 # IDE
 .vscode/

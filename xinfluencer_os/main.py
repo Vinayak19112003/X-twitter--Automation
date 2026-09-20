@@ -14,14 +14,15 @@ from config import settings
 from db import init_db, SessionLocal, get_today_stats
 from agents.trend_research import run_trend_research, get_unused_trends
 from agents.content_writer import create_daily_content, get_pending_drafts
-from agents.openrouter_client import generate_reply
 from agents.perplexity_queries import get_daily_queries
 from agents.quality_safety import (
     validate_content, should_skip_random, can_reply_to_account,
-    check_daily_limits, record_reply, record_account_reply, load_recent_replies
+    check_daily_limits, load_recent_replies
 )
 from agents.browser_operator import BrowserOperator, interactive_login
 from agents.analytics_agent import print_daily_report
+from agents.jev_decision_gate import evaluate_tweet, should_skip_posting
+from agents.jev_client import JevSettings
 
 
 class Orchestrator:
@@ -39,6 +40,39 @@ class Orchestrator:
         self.replies_this_hour = 0
         self.hour_start = datetime.now()
         self.hourly_target = random.randint(8, 12)
+        self.jev_settings = JevSettings.from_env()
+    
+    def _jev_shadow(self) -> bool:
+        """Shadow mode is the default. No X mutations while it is on."""
+        return bool(self.jev_settings.shadow_mode)
+
+    def _apply_jev_gate(self, tweet: dict, source_label: str = "") -> str:
+        """Classify with Jev before any reply generation. Never posts to X.
+
+        Routed actions:
+          IGNORE / SAVE / RESEARCH / REVIEW -> skip posting
+          PREPARE_REPLY -> draft only, queue Telegram stub, still do not post
+        """
+        label = f" [{source_label}]" if source_label else ""
+        preview = (tweet.get("text") or "")[:50]
+        print(f"🧠 Jev classifying{label}: {preview}...")
+        try:
+            decision = evaluate_tweet(tweet, generate_draft=True, run_research=False)
+        except Exception as exc:
+            print(f"⚠️ Jev gate error ({exc.__class__.__name__}); fail-closed REVIEW, skip X")
+            return "REVIEW"
+
+        print(
+            f"   Jev recommended={decision.recommended_action or '-'} "
+            f"routed={decision.final_routed_action} ({decision.reason})"
+        )
+        if decision.errors:
+            print(f"   Jev errors: {'; '.join(decision.errors)}")
+        if decision.final_routed_action == "PREPARE_REPLY" and decision.draft_reply:
+            print(f"   Draft queued for Telegram approval (not posted): {decision.draft_reply[:80]}")
+        if should_skip_posting(decision):
+            print("   X action skipped (shadow / approval required / non-reply route)")
+        return decision.final_routed_action
     
     def start(self, headless: bool = False) -> bool:
         """Initialize system"""
@@ -128,7 +162,11 @@ class Orchestrator:
                 print(f"⚠️ Draft rejected: {reason}")
                 return
             
-            # Post
+            if self._jev_shadow():
+                print("🧠 Jev shadow mode: content draft kept local, not posting to X")
+                return
+
+            # Post (disabled while JEV_SHADOW_MODE=true, the default)
             if self.browser.post_tweet(draft.text):
                 self.last_daily_post = now
                 
@@ -168,9 +206,10 @@ class Orchestrator:
         
         replies_posted = 0
         max_replies_per_cycle = 3
+        classified = 0
         
         for tweet in tweets:
-            if replies_posted >= max_replies_per_cycle:
+            if classified >= max_replies_per_cycle:
                 break
             
             if not self.running:
@@ -190,39 +229,18 @@ class Orchestrator:
                 print(f"🎲 Skipped (random {prob:.0%})")
                 continue
             
-            # Generate reply
-            print(f"🤖 Generating for: {tweet['text'][:50]}...")
-            reply_text, error = generate_reply(tweet['text'])
-            
-            if error:
-                print(f"⚠️ Gen error: {error}")
+            # Jev decision gate: classify before reply generation.
+            # If not PREPARE_REPLY, if shadow, or if REVIEW: skip posting.
+            routed = self._apply_jev_gate(tweet, "feed")
+            classified += 1
+            if routed != "PREPARE_REPLY" or self._jev_shadow() or routed == "REVIEW":
                 continue
-            
-            # Validate
-            is_valid, reason = validate_content(reply_text, "reply")
-            if not is_valid:
-                print(f"⚠️ Rejected: {reason}")
-                # Try once more
-                reply_text, error = generate_reply(tweet['text'])
-                if error:
-                    continue
-                is_valid, reason = validate_content(reply_text, "reply")
-                if not is_valid:
-                    print(f"⚠️ Rejected again: {reason}")
-                    continue
-            
-            # Post reply
-            if self.browser.reply_to_tweet(tweet['url'], reply_text):
-                replies_posted += 1
-                self.replies_this_hour += 1
-                
-                # Record for safety tracking
-                record_reply(reply_text)
-                record_account_reply(tweet.get("handle", ""))
-                
-                print(f"📊 Session: {self.browser.session_actions}/{self.browser.session_target} | Hour: {self.replies_this_hour}/{self.hourly_target}")
+
+            # PREPARE_REPLY outside shadow would still require Telegram approval.
+            # Live X reply posting is not enabled by this integration.
+            print("📝 Prepared reply held for Telegram approval; not posting to X")
         
-        print(f"\n✅ Cycle complete: {replies_posted} replies posted")
+        print(f"\n✅ Cycle complete: {classified} classified, {replies_posted} replies posted (X posting disabled)")
     
     def run_search_reply_cycle(self):
         """Discover tweets via Perplexity-generated search queries and reply"""
@@ -251,9 +269,10 @@ class Orchestrator:
         
         replies_posted = 0
         max_replies_per_cycle = 3
+        classified = 0
         
         for query_data in selected_queries:
-            if replies_posted >= max_replies_per_cycle:
+            if classified >= max_replies_per_cycle:
                 break
             
             if not self.running:
@@ -280,7 +299,7 @@ class Orchestrator:
             time.sleep(random.uniform(2, 5))
             
             for tweet in tweets:
-                if replies_posted >= max_replies_per_cycle:
+                if classified >= max_replies_per_cycle:
                     break
                 
                 if not self.running:
@@ -298,46 +317,23 @@ class Orchestrator:
                     print(f"🎲 Skipped (random {prob:.0%}) [{topic}]")
                     continue
                 
-                # Generate reply
-                print(f"🤖 Generating for [{topic}]: {tweet['text'][:50]}...")
-                reply_text, error = generate_reply(tweet['text'])
-                
-                if error:
-                    print(f"⚠️ Gen error: {error}")
+                # Jev decision gate: classify before reply generation.
+                # If not PREPARE_REPLY, if shadow, or if REVIEW: skip posting.
+                routed = self._apply_jev_gate(tweet, f"search:{topic}")
+                classified += 1
+                if routed != "PREPARE_REPLY" or self._jev_shadow() or routed == "REVIEW":
                     continue
-                
-                # Validate
-                is_valid, reason = validate_content(reply_text, "reply")
-                if not is_valid:
-                    print(f"⚠️ Rejected: {reason}")
-                    # Try once more
-                    reply_text, error = generate_reply(tweet['text'])
-                    if error:
-                        continue
-                    is_valid, reason = validate_content(reply_text, "reply")
-                    if not is_valid:
-                        print(f"⚠️ Rejected again: {reason}")
-                        continue
-                
-                # Post reply
-                if self.browser.reply_to_tweet(tweet['url'], reply_text):
-                    replies_posted += 1
-                    self.replies_this_hour += 1
-                    
-                    # Record for safety tracking
-                    record_reply(reply_text)
-                    record_account_reply(tweet.get("handle", ""))
-                    
-                    # Log with source info
-                    print(f"📊 Posted [{topic}] | Session: {self.browser.session_actions}/{self.browser.session_target} | Hour: {self.replies_this_hour}/{self.hourly_target}")
-                    
-                    # Delay before next
-                    time.sleep(random.uniform(3, 8))
+
+                print("📝 Prepared reply held for Telegram approval; not posting to X")
         
-        print(f"\n✅ Search cycle complete: {replies_posted} replies posted")
+        print(f"\n✅ Search cycle complete: {classified} classified, {replies_posted} replies posted (X posting disabled)")
     
     def run_engagement_cycle(self):
         """Light engagement: likes and retweets"""
+        if self._jev_shadow():
+            print("🧠 Jev shadow mode: skipping likes/retweets (no X mutations)")
+            return
+
         # Check limits
         can_like, _ = check_daily_limits("like")
         can_rt, _ = check_daily_limits("retweet")
@@ -441,6 +437,10 @@ def main():
         init_db()
         print_daily_report()
         return
+
+    if "--shadow-jev" in sys.argv:
+        from scripts.shadow_jev import run as run_shadow_jev
+        raise SystemExit(run_shadow_jev(sys.argv[2:]))
     
     # Default: run orchestrator
     orchestrator = Orchestrator()

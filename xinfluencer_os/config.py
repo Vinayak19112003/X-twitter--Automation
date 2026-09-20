@@ -57,6 +57,13 @@ class Settings(BaseSettings):
     # Paths
     auth_dir: str = "../auth"
     db_path: str = "storage/xinfluencer.db"
+
+    # TypeSafe / Jev decision gate (classification only; never posts to X)
+    typesafe_api_key: str = Field(default="", env="TYPESAFE_API_KEY")
+    typesafe_model: str = Field(default="jev-latest", env="TYPESAFE_MODEL")
+    jev_confidence_threshold: float = Field(default=0.85, env="JEV_CONFIDENCE_THRESHOLD")
+    jev_shadow_mode: bool = Field(default=True, env="JEV_SHADOW_MODE")
+    jev_allow_save: bool = Field(default=False, env="JEV_ALLOW_SAVE")
     
     class Config:
         env_file = Path(__file__).parent / ".env"

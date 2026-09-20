@@ -1,0 +1,22 @@
+{
+  "mode": "shadow",
+  "api_source": "mock",
+  "live_smoke": "skipped_no_TYPESAFE_API_KEY",
+  "generated_at": "2026-09-20T15:18:25.068784+00:00",
+  "count": 6,
+  "counts_by_action": {
+    "IGNORE": 1,
+    "SAVE": 1,
+    "RESEARCH": 1,
+    "PREPARE_REPLY": 1,
+    "REVIEW": 2
+  },
+  "latency_ms": {
+    "avg": 0.3,
+    "median": 0.26,
+    "p95": 0.52,
+    "note": "Placeholders from a mocked demo run. Live TypeSafe was not called. Typical live Jev latency is 70-500ms. export TYPESAFE_API_KEY=... && python -m xinfluencer_os.scripts.shadow_jev --demo --live --limit 2"
+  },
+  "x_mutations": false,
+  "how_to_run_live": "export TYPESAFE_API_KEY=your_key_here && python -m xinfluencer_os.scripts.shadow_jev --demo --live --limit 2"
+}
