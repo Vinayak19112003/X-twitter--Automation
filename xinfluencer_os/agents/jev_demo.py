@@ -60,6 +60,44 @@ DEMO_POSTS: list[dict[str, str]] = [
     },
 ]
 
+FOMO_DEMO_POSTS: list[dict[str, Any]] = [
+    {
+        "id": "demo-fomo-trap-1",
+        "url": "https://x.com/stealth_degen/status/2001",
+        "author": "stealth_degen",
+        "fomo": True,
+        "ca": "So1anaHoneypot111111111111111111111111111",
+        "liq": "800",
+        "deployer": "known_rug_wallet",
+        "text": (
+            "Stealth launch no socials. CA dropping now, ape this before the KOL call. "
+            "Honeypot? nah trust me bro, 100x."
+        ),
+    },
+    {
+        "id": "demo-fomo-cluster-1",
+        "url": "https://x.com/fomo_feed/status/2002",
+        "author": "fomo_feed",
+        "fomo": True,
+        "cluster_hint": "one linked wallet island, 14 bundled snipers",
+        "text": (
+            "FOMO app just printed this memecoin. Copy-trade the bundle. "
+            "Same cluster buying every call, you are late if you wait."
+        ),
+    },
+    {
+        "id": "demo-fomo-research-1",
+        "url": "https://x.com/ca_watcher/status/2003",
+        "author": "ca_watcher",
+        "fomo": True,
+        "ca": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+        "text": (
+            "New CA on the FOMO feed. No obvious trap in the post. "
+            "Check deployer, liq, and bubble map before anyone sizes."
+        ),
+    },
+]
+
 
 def mock_answers_for_post(post_id: str) -> dict[str, Any]:
     """Deterministic canned Jev answers for offline --demo / --mock-api."""
@@ -100,6 +138,42 @@ def mock_answers_for_post(post_id: str) -> dict[str, Any]:
             risk="medium",
             relevance=0.35,
             next_confidence=0.5,
+        ),
+        "demo-fomo-trap-1": _fomo_case(
+            content="advertisement",
+            next_action="PREPARE_REPLY",
+            risk="medium",
+            relevance=0.7,
+            is_fomo=0.96,
+            cluster=0.4,
+            trap=0.97,
+            kol=0.88,
+            farm="high",
+            fomo_next="SKIP",
+        ),
+        "demo-fomo-cluster-1": _fomo_case(
+            content="advertisement",
+            next_action="PREPARE_REPLY",
+            risk="medium",
+            relevance=0.55,
+            is_fomo=0.94,
+            cluster=0.93,
+            trap=0.12,
+            kol=0.35,
+            farm="medium",
+            fomo_next="WATCH_CLUSTER",
+        ),
+        "demo-fomo-research-1": _fomo_case(
+            content="useful_information",
+            next_action="RESEARCH",
+            risk="low",
+            relevance=0.8,
+            is_fomo=0.9,
+            cluster=0.2,
+            trap=0.08,
+            kol=0.1,
+            farm="low",
+            fomo_next="RESEARCH_CA",
         ),
     }
     return catalog.get(post_id, _choice_pack("emotion_opinion", "IGNORE", "low", 0.2))
@@ -156,6 +230,87 @@ def _choice_pack(
     }
 
 
+def _quiet_fomo_answers() -> dict[str, Any]:
+    """Low FOMO signals so non-FOMO demo posts keep their base routes."""
+    return _fomo_answers(
+        is_fomo=0.05,
+        cluster=0.04,
+        trap=0.03,
+        kol=0.04,
+        farm="low",
+        fomo_next="SKIP",
+    )
+
+
+def _fomo_answers(
+    *,
+    is_fomo: float,
+    cluster: float,
+    trap: float,
+    kol: float,
+    farm: str,
+    fomo_next: str,
+    farm_confidence: float = 0.93,
+    fomo_next_confidence: float = 0.94,
+) -> dict[str, Any]:
+    farm_index = {"low": 0, "medium": 1, "high": 2}[farm]
+    farm_probs = {"0": 0.02, "1": 0.02, "2": 0.02}
+    farm_probs[str(farm_index)] = 0.94
+    next_probs = {
+        "SKIP": 0.02,
+        "WATCH_CLUSTER": 0.02,
+        "RESEARCH_CA": 0.02,
+        "PREPARE_NOTE": 0.02,
+    }
+    next_probs[fomo_next] = max(fomo_next_confidence, 0.5)
+    return {
+        "is_fomo_call": {"type": "noul", "noul": is_fomo},
+        "bundled_or_cluster_risk": {"type": "noul", "noul": cluster},
+        "trap_flags": {"type": "noul", "noul": trap},
+        "kol_farm_pattern": {"type": "noul", "noul": kol},
+        "farm_risk": {
+            "type": "score",
+            "score": float(farm_index),
+            "confidence": farm_confidence,
+            "legend": {"0": "low", "1": "medium", "2": "high"},
+            "probabilities": farm_probs,
+        },
+        "fomo_next": {
+            "type": "choice",
+            "choice": fomo_next,
+            "confidence": fomo_next_confidence,
+            "probabilities": next_probs,
+        },
+    }
+
+
+def _fomo_case(
+    *,
+    content: str,
+    next_action: str,
+    risk: str,
+    relevance: float,
+    is_fomo: float,
+    cluster: float,
+    trap: float,
+    kol: float,
+    farm: str,
+    fomo_next: str,
+) -> dict[str, Any]:
+    packed = _choice_pack(content, next_action, risk, relevance)
+    packed.update(
+        _fomo_answers(
+            is_fomo=is_fomo,
+            cluster=cluster,
+            trap=trap,
+            kol=kol,
+            farm=farm,
+            fomo_next=fomo_next,
+        )
+    )
+    return packed
+
+
 def build_mock_transport() -> httpx.MockTransport:
     def handler(request: httpx.Request) -> httpx.Response:
         try:
@@ -163,10 +318,18 @@ def build_mock_transport() -> httpx.MockTransport:
         except (json.JSONDecodeError, UnicodeDecodeError):
             return httpx.Response(400, json={"error": "invalid json"})
         state = payload.get("state") or {}
+        questions = payload.get("questions") or {}
         post_id = str(state.get("post_id") or "")
+        answers = mock_answers_for_post(post_id)
+        if "is_fomo_call" in questions and "is_fomo_call" not in answers:
+            answers = dict(answers)
+            answers.update(_quiet_fomo_answers())
+        requested = {name: answers[name] for name in questions if name in answers}
+        if not requested:
+            requested = answers
         body = {
             "model": payload.get("model") or "jev-latest",
-            "answers": mock_answers_for_post(post_id),
+            "answers": requested,
             "usage": {"input_tokens": 42, "output_tokens": 8},
         }
         return httpx.Response(200, json=body)

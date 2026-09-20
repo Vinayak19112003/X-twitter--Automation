@@ -46,21 +46,30 @@ class JevSettings(BaseModel):
     confidence_threshold: float = 0.85
     shadow_mode: bool = True
     allow_save: bool = False
+    fomo_mode: bool = False
+    fomo_noul_threshold: float = 0.7
     endpoint: str = SYSTEMONE_URL
 
     @classmethod
     def from_env(cls) -> "JevSettings":
         raw_threshold = os.getenv("JEV_CONFIDENCE_THRESHOLD", "0.85")
+        raw_fomo_noul = os.getenv("JEV_FOMO_NOUL_THRESHOLD", "0.7")
         try:
             threshold = float(raw_threshold)
         except ValueError:
             threshold = 0.85
+        try:
+            fomo_noul = float(raw_fomo_noul)
+        except ValueError:
+            fomo_noul = 0.7
         return cls(
             api_key=os.getenv("TYPESAFE_API_KEY", ""),
             model=os.getenv("TYPESAFE_MODEL", DEFAULT_MODEL) or DEFAULT_MODEL,
             confidence_threshold=threshold,
             shadow_mode=_as_bool(os.getenv("JEV_SHADOW_MODE"), True),
             allow_save=_as_bool(os.getenv("JEV_ALLOW_SAVE"), False),
+            fomo_mode=_as_bool(os.getenv("JEV_FOMO_MODE"), False),
+            fomo_noul_threshold=fomo_noul,
         )
 
     @property

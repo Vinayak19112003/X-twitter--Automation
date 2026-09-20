@@ -50,7 +50,9 @@ class Orchestrator:
         """Classify with Jev before any reply generation. Never posts to X.
 
         Routed actions:
-          IGNORE / SAVE / RESEARCH / REVIEW -> skip posting
+          IGNORE / SAVE / RESEARCH / REVIEW / SKIP / WATCH_CLUSTER / RESEARCH_CA
+            -> skip posting; never buy
+          PREPARE_NOTE -> research note only, never a buy, never an X post
           PREPARE_REPLY -> draft only, queue Telegram stub, still do not post
         """
         label = f" [{source_label}]" if source_label else ""
@@ -68,6 +70,8 @@ class Orchestrator:
         )
         if decision.errors:
             print(f"   Jev errors: {'; '.join(decision.errors)}")
+        if decision.final_routed_action == "PREPARE_NOTE" and decision.research_note:
+            print(f"   FOMO research note (never a buy): {decision.research_note[:80]}")
         if decision.final_routed_action == "PREPARE_REPLY" and decision.draft_reply:
             print(f"   Draft queued for Telegram approval (not posted): {decision.draft_reply[:80]}")
         if should_skip_posting(decision):

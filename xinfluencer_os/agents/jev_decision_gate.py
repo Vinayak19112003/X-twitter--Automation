@@ -29,6 +29,16 @@ from agents.jev_client import (
     NoulAnswer,
     ScoreAnswer,
 )
+from agents.jev_fomo import (
+    FOMO_QUESTION_NAMES,
+    FOMO_ROUTES,
+    TRADE_ACTIONS,
+    build_fomo_questions,
+    fomo_known_fields,
+    should_execute_trade,
+    should_include_fomo_pack,
+    stub_research_note,
+)
 from agents.telegram_approval import queue_for_approval
 
 logger = logging.getLogger(__name__)
@@ -67,7 +77,10 @@ NEXT_ACTION_CRITERIA = {
 INTERACTION_RISK_CRITERIA = ["low", "medium", "high"]
 RISK_LABELS = ("low", "medium", "high")
 
-RoutedAction = str  # IGNORE | SAVE | RESEARCH | PREPARE_REPLY | REVIEW
+RoutedAction = str  # IGNORE | SAVE | RESEARCH | PREPARE_REPLY | REVIEW | SKIP | WATCH_CLUSTER | RESEARCH_CA | PREPARE_NOTE
+
+BASE_QUESTION_NAMES = ("content_type", "relevance", "interaction_risk", "next_action")
+BASE_CONFIDENCE_FIELDS = ("content_type", "interaction_risk", "next_action")
 
 X_MUTATION_ACTIONS = frozenset({
     "like",
@@ -82,12 +95,17 @@ X_MUTATION_ACTIONS = frozenset({
     "post",
     "quote",
     "financial",
+    "buy",
+    "ape",
+    "snipe",
+    "swap",
+    "trade",
 })
 
 
-def build_questions() -> dict[str, Any]:
+def build_questions(*, include_fomo: bool = False) -> dict[str, Any]:
     """SystemOne questions. Must match the TypeSafe request contract."""
-    return {
+    questions = {
         "content_type": {
             "type": "choice",
             "instructions": (
@@ -112,10 +130,13 @@ def build_questions() -> dict[str, Any]:
             "criteria": dict(NEXT_ACTION_CRITERIA),
         },
     }
+    if include_fomo:
+        questions.update(build_fomo_questions())
+    return questions
 
 
-def build_state(post: "PostInput") -> dict[str, Any]:
-    return {
+def build_state(post: "PostInput", *, include_fomo: bool = False) -> dict[str, Any]:
+    state: dict[str, Any] = {
         "post_id": post.id,
         "url": post.url,
         "author_handle": post.author,
@@ -123,6 +144,14 @@ def build_state(post: "PostInput") -> dict[str, Any]:
         "text": post.text,
         "user_interests": list(USER_INTERESTS),
     }
+    if include_fomo:
+        state["fomo_related"] = True
+        state["known_fields"] = fomo_known_fields(post)
+        state["kill_rules"] = (
+            "Maran FOMO-app: agent finds, human sizes, agent never buys. "
+            "On-chain checks (bubblemaps, liq, deployer) are Grok Bot / human steps."
+        )
+    return state
 
 
 @dataclass
@@ -132,6 +161,11 @@ class PostInput:
     author: str = ""
     author_name: str = ""
     text: str = ""
+    ca: str = ""
+    liq: str = ""
+    deployer: str = ""
+    cluster_hint: str = ""
+    fomo_related: bool = False
 
     def as_log_author(self) -> str:
         if self.author_name and self.author and self.author_name != self.author:
@@ -161,6 +195,12 @@ class GateDecision:
     reason: str = ""
     model: str | None = None
     attempts: int = 0
+    fomo_pack_applied: bool = False
+    is_fomo_call: float | None = None
+    farm_risk: str | None = None
+    fomo_next: str | None = None
+    research_note: str | None = None
+    never_buy: bool = True
 
     @property
     def skip_x_mutation(self) -> bool:
@@ -186,9 +226,16 @@ class GateDecision:
             "shadow_mode": self.shadow_mode,
             "save_permitted": self.save_permitted,
             "draft_reply": self.draft_reply,
+            "research_note": self.research_note,
             "reason": self.reason,
             "model": self.model,
             "attempts": self.attempts,
+            "fomo_pack_applied": self.fomo_pack_applied,
+            "is_fomo_call": self.is_fomo_call,
+            "farm_risk": self.farm_risk,
+            "fomo_next": self.fomo_next,
+            "never_buy": True,
+            "ca": self.post.ca or None,
         }
 
 
@@ -201,12 +248,19 @@ def post_from_mapping(raw: dict[str, Any]) -> PostInput:
     if author.startswith("@"):
         handle = author[1:]
         author = handle
+    fomo_flag = raw.get("fomo") if "fomo" in raw else raw.get("fomo_related")
+    topic = str(raw.get("topic") or "").strip().lower()
     return PostInput(
         id=post_id,
         url=url,
         author=author,
         author_name=author_name or author,
         text=str(raw.get("text") or ""),
+        ca=str(raw.get("ca") or raw.get("contract") or ""),
+        liq=str(raw.get("liq") or raw.get("liquidity") or ""),
+        deployer=str(raw.get("deployer") or ""),
+        cluster_hint=str(raw.get("cluster_hint") or raw.get("cluster") or ""),
+        fomo_related=bool(fomo_flag) or topic == "fomo",
     )
 
 
@@ -245,18 +299,37 @@ def evaluate_post(
     log_dir: Path | None = None,
     write_log: bool = True,
 ) -> GateDecision:
-    """Classify one post and apply routing rules. No X mutations."""
+    """Classify one post and apply routing rules. No X mutations. Never buys."""
     settings = settings or JevSettings.from_env()
     timestamp = datetime.now(timezone.utc).isoformat()
     client = client or JevClient(settings)
+    include_fomo = should_include_fomo_pack(post, settings.fomo_mode)
 
-    result = client.classify(build_state(post), build_questions())
-    decision = route_result(post, result, settings, timestamp)
+    result = client.classify(
+        build_state(post, include_fomo=include_fomo),
+        build_questions(include_fomo=include_fomo),
+    )
+    decision = route_result(
+        post,
+        result,
+        settings,
+        timestamp,
+        fomo_pack_applied=include_fomo,
+    )
 
-    if decision.final_routed_action == "RESEARCH":
+    if decision.final_routed_action in {"RESEARCH", "RESEARCH_CA", "WATCH_CLUSTER"}:
         decision.research_ticket = flag_for_grok_research(
-            {"id": post.id, "url": post.url, "text": post.text},
+            {"id": post.id, "url": post.url, "text": post.text, "ca": post.ca},
             run=run_research,
+            reason=(
+                "Jev routed RESEARCH_CA: verify CA, deployer, liq, bubble map"
+                if decision.final_routed_action == "RESEARCH_CA"
+                else (
+                    "Jev routed WATCH_CLUSTER: wait for multi-wallet cluster confirm"
+                    if decision.final_routed_action == "WATCH_CLUSTER"
+                    else "Jev recommended RESEARCH"
+                )
+            ),
         )
 
     if decision.final_routed_action == "PREPARE_REPLY" and generate_draft:
@@ -271,6 +344,19 @@ def evaluate_post(
             }
         )
 
+    if decision.final_routed_action == "PREPARE_NOTE" and generate_draft:
+        decision.research_note = sanitize_draft(stub_research_note(post))
+        decision.telegram_receipt = queue_for_approval(
+            {
+                "kind": "fomo_research_note",
+                "post_id": post.id,
+                "url": post.url,
+                "research_note": decision.research_note,
+                "never_buy": True,
+                "note": "Research note only. Human sizes. Agent never buys.",
+            }
+        )
+
     if write_log:
         append_shadow_log(decision.to_log_record(), log_dir=log_dir)
 
@@ -282,8 +368,10 @@ def route_result(
     result: JevCallResult,
     settings: JevSettings,
     timestamp: str,
+    *,
+    fomo_pack_applied: bool = False,
 ) -> GateDecision:
-    """Apply routing rules after Jev answers. Fail closed to REVIEW."""
+    """Apply routing rules after Jev answers. Fail closed to REVIEW. Never buys."""
     base = GateDecision(
         post=post,
         recommended_action=None,
@@ -294,6 +382,8 @@ def route_result(
         save_permitted=bool(settings.allow_save) and not settings.shadow_mode,
         attempts=result.attempts,
         model=result.response.model if result.response else None,
+        fomo_pack_applied=fomo_pack_applied,
+        never_buy=True,
     )
 
     if not result.ok or result.response is None:
@@ -319,8 +409,11 @@ def route_result(
     base.answers = {name: _answer_dump(ans) for name, ans in answers.items()}
     base.probabilities = {name: _answer_probabilities(ans) for name, ans in answers.items()}
     base.confidence = {name: _answer_confidence(ans) for name, ans in answers.items()}
+    base.is_fomo_call = _noul_value(answers.get("is_fomo_call"))
+    base.farm_risk = _score_label(answers.get("farm_risk"))
+    base.fomo_next = _choice_value(answers.get("fomo_next"))
 
-    missing = [name for name in ("content_type", "relevance", "interaction_risk", "next_action") if name not in answers]
+    missing = [name for name in BASE_QUESTION_NAMES if name not in answers]
     if missing:
         base.errors.append(f"Missing Jev answers: {', '.join(missing)}")
         base.reason = "missing_answers"
@@ -332,11 +425,20 @@ def route_result(
         base.reason = "scam_or_high_risk"
         return base
 
-    low_conf = _low_confidence_fields(answers, settings.confidence_threshold)
+    low_conf = _low_confidence_fields(
+        answers,
+        settings.confidence_threshold,
+        field_names=BASE_CONFIDENCE_FIELDS,
+    )
     if low_conf:
         base.final_routed_action = "REVIEW"
         base.reason = f"low_confidence:{','.join(low_conf)}"
         return base
+
+    if fomo_pack_applied:
+        fomo_decision = _route_fomo(base, answers, settings)
+        if fomo_decision is not None:
+            return fomo_decision
 
     if next_choice == "IGNORE":
         base.final_routed_action = "IGNORE"
@@ -363,10 +465,95 @@ def route_result(
     return base
 
 
+def _route_fomo(
+    base: GateDecision,
+    answers: dict[str, Any],
+    settings: JevSettings,
+) -> GateDecision | None:
+    """Maran kill rules. Returns a decision to short-circuit, or None to use base next_action."""
+    missing_fomo = [name for name in FOMO_QUESTION_NAMES if name not in answers]
+    if missing_fomo:
+        base.errors.append(f"Missing FOMO answers: {', '.join(missing_fomo)}")
+        base.reason = "missing_fomo_answers"
+        base.final_routed_action = "REVIEW"
+        return base
+
+    noul_cut = settings.fomo_noul_threshold
+    conf_cut = settings.confidence_threshold
+    trap = _noul_value(answers.get("trap_flags"))
+    kol = _noul_value(answers.get("kol_farm_pattern"))
+    is_fomo = _noul_value(answers.get("is_fomo_call"))
+    cluster = _noul_value(answers.get("bundled_or_cluster_risk"))
+    farm_label = _score_label(answers.get("farm_risk"))
+    farm_ans = answers.get("farm_risk")
+    fomo_next = _choice_value(answers.get("fomo_next"))
+    fomo_next_ans = answers.get("fomo_next")
+
+    if trap is not None and trap >= noul_cut:
+        if _noul_confident(trap, conf_cut):
+            return _finish_fomo(base, "SKIP", "fomo_trap_flags", fomo_next)
+        return _finish_fomo(base, "REVIEW", "fomo_trap_low_confidence", fomo_next)
+
+    if farm_label == "high":
+        farm_conf = _answer_confidence(farm_ans)
+        if farm_conf is not None and farm_conf < conf_cut:
+            return _finish_fomo(base, "REVIEW", "fomo_farm_risk_low_confidence", fomo_next)
+        return _finish_fomo(base, "SKIP", "fomo_farm_risk_high", fomo_next)
+
+    if kol is not None and kol >= noul_cut:
+        if _noul_confident(kol, conf_cut):
+            return _finish_fomo(base, "SKIP", "fomo_kol_farm_pattern", fomo_next)
+        return _finish_fomo(base, "REVIEW", "fomo_kol_low_confidence", fomo_next)
+
+    fomo_high = is_fomo is not None and is_fomo >= noul_cut
+    cluster_high = cluster is not None and cluster >= noul_cut
+    if fomo_high and cluster_high:
+        routed = "SKIP" if fomo_next == "SKIP" else "WATCH_CLUSTER"
+        return _finish_fomo(base, routed, "fomo_call_and_cluster", fomo_next)
+
+    if not fomo_high:
+        return None
+
+    # FOMO candidate: prefer fomo_next. Never PREPARE_REPLY. Never buy.
+    fomo_next_conf = _answer_confidence(fomo_next_ans)
+    if fomo_next_conf is not None and fomo_next_conf < conf_cut:
+        return _finish_fomo(base, "REVIEW", "fomo_next_low_confidence", fomo_next)
+
+    if fomo_next in FOMO_ROUTES:
+        reason = {
+            "SKIP": "fomo_next_skip",
+            "WATCH_CLUSTER": "fomo_watch_cluster",
+            "RESEARCH_CA": "fomo_research_ca_human_onchain",
+            "PREPARE_NOTE": "fomo_research_note_never_buy",
+        }[fomo_next]
+        return _finish_fomo(base, fomo_next, reason, fomo_next)
+
+    return _finish_fomo(base, "REVIEW", f"unrecognized_fomo_next:{fomo_next}", fomo_next)
+
+
+def _finish_fomo(
+    base: GateDecision,
+    routed: str,
+    reason: str,
+    fomo_next: str | None,
+) -> GateDecision:
+    base.final_routed_action = routed
+    base.reason = reason
+    base.fomo_next = fomo_next
+    if fomo_next:
+        base.recommended_action = fomo_next
+    base.never_buy = True
+    return base
+
+
+def _noul_confident(noul: float, threshold: float) -> bool:
+    return max(noul, 1.0 - noul) >= threshold
+
+
 def should_perform_x_action(action: str, decision: GateDecision | None = None) -> bool:
-    """Jev never performs X mutations, including when shadow mode is off."""
+    """Jev never performs X mutations or trades, including when shadow mode is off."""
     del decision
-    if action.lower() in X_MUTATION_ACTIONS:
+    if action.lower() in X_MUTATION_ACTIONS or action.lower() in TRADE_ACTIONS:
         return False
     return False
 
@@ -374,11 +561,12 @@ def should_perform_x_action(action: str, decision: GateDecision | None = None) -
 def should_skip_posting(decision: GateDecision, shadow_mode: bool | None = None) -> bool:
     """True unless a future Telegram-approved executor is wired.
 
-    Today this is always True: PREPARE_REPLY drafts stay off X, REVIEW and
-    non-reply routes never post, and shadow mode (default) forbids mutations.
+    Today this is always True: PREPARE_REPLY drafts stay off X, FOMO routes never
+    post or buy, REVIEW and non-reply routes never post, and shadow mode forbids
+    mutations.
     """
-    shadow = decision.shadow_mode if shadow_mode is None else shadow_mode
-    if shadow:
+    del shadow_mode
+    if decision.final_routed_action in FOMO_ROUTES:
         return True
     if decision.final_routed_action != "PREPARE_REPLY":
         return True
@@ -491,10 +679,16 @@ def _label_from_score_key(key: str, legend: dict[str, str]) -> str | None:
     return None
 
 
-def _low_confidence_fields(answers: dict[str, Any], threshold: float) -> list[str]:
+def _low_confidence_fields(
+    answers: dict[str, Any],
+    threshold: float,
+    field_names: tuple[str, ...] | None = None,
+) -> list[str]:
     """Choice/score confidence below threshold -> REVIEW. Noul is not included."""
+    names = field_names if field_names is not None else tuple(answers.keys())
     low: list[str] = []
-    for name, answer in answers.items():
+    for name in names:
+        answer = answers.get(name)
         if isinstance(answer, (ChoiceAnswer, ScoreAnswer)) and answer.confidence < threshold:
             low.append(name)
     return low

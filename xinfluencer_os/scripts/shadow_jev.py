@@ -36,7 +36,7 @@ from agents.jev_decision_gate import (
     post_from_mapping,
     summarize_decisions,
 )
-from agents.jev_demo import DEMO_POSTS, build_mock_transport
+from agents.jev_demo import DEMO_POSTS, FOMO_DEMO_POSTS, build_mock_transport
 
 
 def load_posts(path: Path) -> list[dict[str, Any]]:
@@ -98,6 +98,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Mark RESEARCH tickets as locally queued. Still does not call external services.",
     )
     parser.add_argument(
+        "--fomo",
+        action="store_true",
+        help=(
+            "Enable Maran FOMO kill-rule questions. Also implied by JEV_FOMO_MODE=true. "
+            "Never buys. With --demo, includes FOMO sample posts."
+        ),
+    )
+    parser.add_argument(
         "--report-out",
         type=Path,
         default=None,
@@ -118,9 +126,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def run(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     settings = JevSettings.from_env()
+    if args.fomo:
+        settings = settings.model_copy(update={"fomo_mode": True})
     client, source = build_client(args, settings)
 
-    raw_posts = DEMO_POSTS if args.demo else load_posts(args.input)
+    if args.demo:
+        raw_posts = list(DEMO_POSTS)
+        if settings.fomo_mode:
+            raw_posts.extend(FOMO_DEMO_POSTS)
+    else:
+        raw_posts = load_posts(args.input)
     posts = raw_posts[: max(0, args.limit)]
 
     print("=" * 60)
@@ -128,7 +143,9 @@ def run(argv: list[str] | None = None) -> int:
     print("=" * 60)
     print(f"source={source}  shadow={settings.shadow_mode}  model={settings.model}")
     print(f"threshold={settings.confidence_threshold}  allow_save={settings.allow_save}")
+    print(f"fomo_mode={settings.fomo_mode}  fomo_noul={settings.fomo_noul_threshold}")
     print("X mutations: disabled (classify + log only)")
+    print("Trades: disabled (agent never buys)")
     print(f"posts={len(posts)}")
     print()
 
@@ -158,6 +175,8 @@ def run(argv: list[str] | None = None) -> int:
             print(f"    errors: {'; '.join(decision.errors)}")
         if decision.draft_reply:
             print(f"    draft (not posted): {decision.draft_reply[:100]}")
+        if decision.research_note:
+            print(f"    research note (never a buy): {decision.research_note[:100]}")
 
     summary = summarize_decisions(decisions)
     latency = summary["latency_ms"]
@@ -182,9 +201,14 @@ def run(argv: list[str] | None = None) -> int:
         "counts_by_action": summary["counts_by_action"],
         "latency_ms": latency,
         "x_mutations": False,
+        "never_buy": True,
+        "fomo_mode": settings.fomo_mode,
         "how_to_run_live": (
             "export TYPESAFE_API_KEY=your_key_here && "
             "python -m xinfluencer_os.scripts.shadow_jev --demo --live --limit 2"
+        ),
+        "how_to_run_fomo": (
+            "python -m xinfluencer_os.scripts.shadow_jev --demo --fomo --mock-api"
         ),
     }
 

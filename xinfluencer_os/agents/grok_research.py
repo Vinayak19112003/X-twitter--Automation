@@ -29,8 +29,9 @@ def flag_for_grok_research(
         "ran": bool(run),
         "external_calls": False,
         "note": (
-            "Local research ticket only. Pass --run-research to mark as queued; "
-            "this still does not call Grok, Perplexity, or X."
+            "Local research ticket only. On-chain checks (bubblemaps, liq, deployer, "
+            "cluster) stay with Grok Bot or a human. Pass --run-research to mark as "
+            "queued; this still does not call Grok, Perplexity, X, or any wallet."
         ),
     }
     logger.info(

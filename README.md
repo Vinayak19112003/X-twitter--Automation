@@ -84,10 +84,12 @@ The modern orchestrator lives in `xinfluencer_os/`. Jev (TypeSafe SystemOne) is 
 - Jev never writes replies and never performs X actions.
 - Shadow mode is default: classify + log only.
 - Prepared replies go to a Telegram approval stub; they are not posted.
+- Optional Maran FOMO kill rules (`--fomo` / `JEV_FOMO_MODE`) classify FOMO-app calls. The agent never buys.
 
 See [`xinfluencer_os/README.md`](xinfluencer_os/README.md) for the shadow CLI, env vars, and routing rules.
 
 ```bash
 python -m xinfluencer_os.scripts.shadow_jev --demo
+python -m xinfluencer_os.scripts.shadow_jev --demo --fomo
 python -m pytest xinfluencer_os/tests
 ```

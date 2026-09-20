@@ -15,12 +15,15 @@ import pytest
 from agents.jev_client import JevCallResult, JevClient, JevResponse, JevSettings
 from agents.jev_decision_gate import (
     PostInput,
+    build_questions,
     evaluate_post,
     route_result,
+    should_execute_trade,
     should_perform_x_action,
     should_skip_posting,
 )
-from agents.jev_demo import build_mock_transport, mock_answers_for_post
+from agents.jev_demo import FOMO_DEMO_POSTS, build_mock_transport, mock_answers_for_post
+from agents.jev_fomo import looks_fomo_related, should_include_fomo_pack
 
 
 def _settings(**overrides) -> JevSettings:
@@ -385,6 +388,8 @@ def test_build_questions_match_contract():
     assert q["interaction_risk"]["type"] == "score"
     assert q["interaction_risk"]["criteria"] == ["low", "medium", "high"]
     assert set(q["next_action"]["criteria"]) == {"IGNORE", "SAVE", "RESEARCH", "PREPARE_REPLY"}
+    assert "is_fomo_call" not in q
+    assert "fomo_next" not in q
 
 
 def _fixed_answers_transport(answers: dict) -> httpx.MockTransport:
@@ -400,3 +405,279 @@ def test_mock_transport_helper_roundtrip():
     result = client.classify({"post_id": "demo-reply-1"}, {"dummy": {"type": "noul", "instructions": "x"}})
     assert result.ok
     assert result.response.answers["next_action"].choice == "PREPARE_REPLY"
+
+
+def _fomo_fields(
+    *,
+    is_fomo: float = 0.9,
+    cluster: float = 0.1,
+    trap: float = 0.05,
+    kol: float = 0.05,
+    farm: str = "low",
+    fomo_next: str = "RESEARCH_CA",
+    farm_confidence: float = 0.93,
+    fomo_next_confidence: float = 0.94,
+) -> dict:
+    farm_index = {"low": 0, "medium": 1, "high": 2}[farm]
+    return {
+        "is_fomo_call": {"type": "noul", "noul": is_fomo},
+        "bundled_or_cluster_risk": {"type": "noul", "noul": cluster},
+        "trap_flags": {"type": "noul", "noul": trap},
+        "kol_farm_pattern": {"type": "noul", "noul": kol},
+        "farm_risk": {
+            "type": "score",
+            "score": float(farm_index),
+            "confidence": farm_confidence,
+            "legend": {"0": "low", "1": "medium", "2": "high"},
+            "probabilities": {str(farm_index): 0.9},
+        },
+        "fomo_next": {
+            "type": "choice",
+            "choice": fomo_next,
+            "confidence": fomo_next_confidence,
+            "probabilities": {fomo_next: 0.9},
+        },
+    }
+
+
+def _route_fomo(answers: dict, **setting_kw) -> "tuple":
+    decision = route_result(
+        _post(),
+        _ok_result(answers),
+        _settings(**setting_kw),
+        "t",
+        fomo_pack_applied=True,
+    )
+    return decision.final_routed_action, decision
+
+
+def test_fomo_clear_trap_skips_never_prepare_reply():
+    answers = _answers(next_action="PREPARE_REPLY", risk="medium")
+    answers.update(_fomo_fields(trap=0.97, farm="high", fomo_next="SKIP", is_fomo=0.95))
+    routed, decision = _route_fomo(answers)
+    assert routed == "SKIP"
+    assert decision.reason == "fomo_trap_flags"
+    assert decision.final_routed_action != "PREPARE_REPLY"
+    assert should_execute_trade(decision) is False
+    assert should_perform_x_action("buy", decision) is False
+    assert should_skip_posting(decision) is True
+
+
+def test_fomo_cluster_risk_watch_cluster():
+    answers = _answers(next_action="PREPARE_REPLY", risk="medium")
+    answers.update(
+        _fomo_fields(
+            is_fomo=0.94,
+            cluster=0.93,
+            trap=0.12,
+            kol=0.2,
+            farm="medium",
+            fomo_next="WATCH_CLUSTER",
+        )
+    )
+    routed, decision = _route_fomo(answers)
+    assert routed == "WATCH_CLUSTER"
+    assert decision.reason == "fomo_call_and_cluster"
+    assert should_execute_trade(decision) is False
+
+
+def test_fomo_clean_research_ca(tmp_path: Path):
+    answers = _answers(next_action="RESEARCH", risk="low")
+    answers.update(
+        _fomo_fields(
+            is_fomo=0.91,
+            cluster=0.15,
+            trap=0.08,
+            farm="low",
+            fomo_next="RESEARCH_CA",
+        )
+    )
+    client = JevClient(_settings(fomo_mode=True), transport=_fixed_answers_transport(answers))
+    post = PostInput(
+        id="ca1",
+        url="https://x.com/u/status/ca1",
+        author="u",
+        text="New CA on the FOMO feed. Check bubble map before sizing.",
+        ca="DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+        fomo_related=True,
+    )
+    decision = evaluate_post(
+        post,
+        client=client,
+        settings=_settings(fomo_mode=True),
+        generate_draft=False,
+        run_research=True,
+        log_dir=tmp_path,
+    )
+    assert decision.final_routed_action == "RESEARCH_CA"
+    assert decision.research_ticket is not None
+    assert decision.research_ticket["external_calls"] is False
+    assert "bubble" in decision.research_ticket["reason"].lower() or "CA" in decision.research_ticket["reason"]
+    assert should_execute_trade(decision) is False
+
+
+def test_fomo_next_low_confidence_review():
+    answers = _answers(next_action="RESEARCH", risk="low")
+    answers.update(
+        _fomo_fields(
+            is_fomo=0.92,
+            cluster=0.1,
+            trap=0.05,
+            farm="low",
+            fomo_next="RESEARCH_CA",
+            fomo_next_confidence=0.4,
+        )
+    )
+    routed, decision = _route_fomo(answers)
+    assert routed == "REVIEW"
+    assert "low_confidence" in decision.reason
+
+
+def test_fomo_prepare_note_never_buy(tmp_path: Path):
+    answers = _answers(next_action="PREPARE_REPLY", risk="low")
+    answers.update(
+        _fomo_fields(
+            is_fomo=0.9,
+            trap=0.05,
+            cluster=0.1,
+            farm="low",
+            fomo_next="PREPARE_NOTE",
+        )
+    )
+    client = JevClient(_settings(fomo_mode=True), transport=_fixed_answers_transport(answers))
+    decision = evaluate_post(
+        _post("note1", "FOMO app printed a memecoin CA: abc, worth a closer look."),
+        client=client,
+        settings=_settings(fomo_mode=True),
+        generate_draft=True,
+        log_dir=tmp_path,
+        draft_fn=lambda p: "this reply must not become a buy",
+    )
+    assert decision.final_routed_action == "PREPARE_NOTE"
+    assert decision.research_note is not None
+    assert "not a buy" in decision.research_note.lower()
+    assert decision.draft_reply is None
+    assert decision.telegram_receipt["live_send"] is False
+    assert "never_buy" in decision.telegram_receipt["payload_keys"]
+    assert should_execute_trade(decision) is False
+    assert should_perform_x_action("ape", decision) is False
+
+
+def test_fomo_pack_off_keeps_base_questions(tmp_path: Path):
+    calls: list[httpx.Request] = []
+    body = {"model": "jev-latest", "answers": _answers(next_action="IGNORE")}
+    transport = _transport_from_sequence([(200, body)], calls=calls)
+    client = JevClient(_settings(fomo_mode=False), transport=transport)
+    decision = evaluate_post(
+        _post("p1", "hello from a cat video"),
+        client=client,
+        settings=_settings(fomo_mode=False),
+        generate_draft=False,
+        log_dir=tmp_path,
+    )
+    assert decision.final_routed_action == "IGNORE"
+    payload = json.loads(calls[0].content.decode("utf-8"))
+    assert "is_fomo_call" not in payload["questions"]
+    assert "fomo_next" not in payload["questions"]
+    assert decision.fomo_pack_applied is False
+
+
+def test_fomo_heuristic_includes_pack_without_env(tmp_path: Path):
+    calls: list[httpx.Request] = []
+    answers = _answers(next_action="PREPARE_REPLY", risk="low")
+    answers.update(_fomo_fields(is_fomo=0.91, fomo_next="RESEARCH_CA", trap=0.05))
+    transport = _transport_from_sequence(
+        [(200, {"model": "jev-latest", "answers": answers})],
+        calls=calls,
+    )
+    client = JevClient(_settings(fomo_mode=False), transport=transport)
+    decision = evaluate_post(
+        _post("h1", "FOMO app printed this memecoin. Ape this CA: abc before the KOL call."),
+        client=client,
+        settings=_settings(fomo_mode=False),
+        generate_draft=False,
+        log_dir=tmp_path,
+    )
+    payload = json.loads(calls[0].content.decode("utf-8"))
+    assert "is_fomo_call" in payload["questions"]
+    assert decision.fomo_pack_applied is True
+    assert decision.final_routed_action == "RESEARCH_CA"
+
+
+def test_looks_fomo_related_heuristic():
+    assert looks_fomo_related(_post("a", "My cat just knocked over a plant")) is False
+    assert looks_fomo_related(_post("b", "FOMO app printed a memecoin, ape this")) is True
+    marked = _post("c", "hello")
+    marked.fomo_related = True
+    assert looks_fomo_related(marked) is True
+    with_ca = _post("d", "interesting token")
+    with_ca.ca = "SomeCa111"
+    assert looks_fomo_related(with_ca) is True
+    assert should_include_fomo_pack(_post("e", "hello"), fomo_mode=False) is False
+    assert should_include_fomo_pack(_post("f", "hello"), fomo_mode=True) is True
+
+
+def test_fomo_never_buy_invariant_on_demo_fixtures():
+    expected = {
+        "demo-fomo-trap-1": "SKIP",
+        "demo-fomo-cluster-1": "WATCH_CLUSTER",
+        "demo-fomo-research-1": "RESEARCH_CA",
+    }
+    for post_id, routed in expected.items():
+        result = JevCallResult(
+            ok=True,
+            response=JevResponse(model="jev-latest", answers=mock_answers_for_post(post_id)),
+            latency_ms=1.0,
+        )
+        decision = route_result(_post(post_id), result, _settings(), "t", fomo_pack_applied=True)
+        assert decision.final_routed_action == routed, post_id
+        assert decision.final_routed_action != "PREPARE_REPLY"
+        assert should_execute_trade(decision) is False
+        assert should_perform_x_action("buy", decision) is False
+
+
+def test_build_fomo_questions_contract():
+    q = build_questions(include_fomo=True)
+    assert q["is_fomo_call"]["type"] == "noul"
+    assert q["bundled_or_cluster_risk"]["type"] == "noul"
+    assert q["trap_flags"]["type"] == "noul"
+    assert q["kol_farm_pattern"]["type"] == "noul"
+    assert q["farm_risk"]["type"] == "score"
+    assert q["farm_risk"]["criteria"] == ["low", "medium", "high"]
+    assert set(q["fomo_next"]["criteria"]) == {
+        "SKIP",
+        "WATCH_CLUSTER",
+        "RESEARCH_CA",
+        "PREPARE_NOTE",
+    }
+    assert "PREPARE_REPLY" not in q["fomo_next"]["criteria"]
+
+
+def test_shadow_cli_fomo_demo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    from xinfluencer_os.scripts.shadow_jev import run
+
+    report = tmp_path / "report.json"
+    logs = tmp_path / "logs"
+    rc = run(
+        [
+            "--demo",
+            "--fomo",
+            "--mock-api",
+            "--limit",
+            "20",
+            "--report-out",
+            str(report),
+            "--log-dir",
+            str(logs),
+        ]
+    )
+    assert rc == 0
+    data = json.loads(report.read_text(encoding="utf-8"))
+    assert data["never_buy"] is True
+    assert data["x_mutations"] is False
+    assert data["fomo_mode"] is True
+    assert data["count"] == 6 + len(FOMO_DEMO_POSTS)
+    assert data["counts_by_action"].get("SKIP") == 1
+    assert data["counts_by_action"].get("WATCH_CLUSTER") == 1
+    assert data["counts_by_action"].get("RESEARCH_CA") == 1

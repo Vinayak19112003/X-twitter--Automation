@@ -64,6 +64,9 @@ class Settings(BaseSettings):
     jev_confidence_threshold: float = Field(default=0.85, env="JEV_CONFIDENCE_THRESHOLD")
     jev_shadow_mode: bool = Field(default=True, env="JEV_SHADOW_MODE")
     jev_allow_save: bool = Field(default=False, env="JEV_ALLOW_SAVE")
+    # FOMO kill rules (Maran). Default false keeps non-FOMO classification unchanged.
+    jev_fomo_mode: bool = Field(default=False, env="JEV_FOMO_MODE")
+    jev_fomo_noul_threshold: float = Field(default=0.7, env="JEV_FOMO_NOUL_THRESHOLD")
     
     class Config:
         env_file = Path(__file__).parent / ".env"
